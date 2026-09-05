@@ -16,6 +16,8 @@ concurrency:
 env:
   COMMON_REPOSITORY: GoRhanHee/android_kernel_samsung_sm8550_common
   COMMON_REF: android13-5.15-sm8550
+  KERNEL_CONFIG_REPOSITORY: GoRhanHee/android_kernel_samsung_sm8550
+  KERNEL_CONFIG_REF: 157bc3f214f8ed670f6e7cd1466bf74c21fe3108
   KSU_REPOSITORY: KernelSU-Next/KernelSU-Next
   KSU_REF: 36aa55c521e509449bfe48bae0ab8c397174c1cb
   TOOLCHAIN_VERSION: r614150
@@ -37,6 +39,17 @@ jobs:
           repository: ${{ env.COMMON_REPOSITORY }}
           ref: ${{ env.COMMON_REF }}
           path: common
+          fetch-depth: 1
+
+      - name: Checkout main kernel config
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.KERNEL_CONFIG_REPOSITORY }}
+          ref: ${{ env.KERNEL_CONFIG_REF }}
+          path: kernel-config
+          sparse-checkout: |
+            custom_defconfigs/gorhanhee_defconfig
+          sparse-checkout-cone-mode: false
           fetch-depth: 1
 
       - name: Checkout KernelSU-Next
@@ -125,9 +138,11 @@ jobs:
           set -euxo pipefail
           kernel_src="$GITHUB_WORKSPACE/common"
           kernel_out="$GITHUB_WORKSPACE/kernel-out"
+          kernel_config="$GITHUB_WORKSPACE/kernel-config/custom_defconfigs/gorhanhee_defconfig"
 
           git config --global --add safe.directory "$kernel_src"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/KernelSU-Next"
+          test -s "$kernel_config"
 
           make -C "$kernel_src" \
             O="$kernel_out" \
@@ -137,6 +152,13 @@ jobs:
             GOOGLE_BRANCH="$GOOGLE_BRANCH" \
             KMI_GENERATION="$KMI_GENERATION" \
             gki_defconfig
+
+          (
+            cd "$kernel_out"
+            "$kernel_src/scripts/kconfig/merge_config.sh" \
+              -m .config \
+              "$kernel_config"
+          )
 
           "$kernel_src/scripts/config" --file "$kernel_out/.config" \
             -e LTO_CLANG \
@@ -162,6 +184,8 @@ jobs:
             GOOGLE_BRANCH="$GOOGLE_BRANCH" \
             KMI_GENERATION="$KMI_GENERATION" \
             olddefconfig
+
+          test "$(grep -E '^CONFIG_KSU=' "$kernel_out/.config")" = "CONFIG_KSU=m"
 
           grep -E '^(CONFIG_(KSU|LTO_CLANG|LTO_CLANG_THIN|LTO_CLANG_FULL|THINLTO|CFI_CLANG|MODULES|MODULE_UNLOAD|MODVERSIONS|KPROBES|EXT4_FS|LOCALVERSION))=' \
             "$kernel_out/.config" || true
