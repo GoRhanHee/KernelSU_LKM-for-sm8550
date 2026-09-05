@@ -165,24 +165,38 @@ jobs:
           grep -E '^(CONFIG_(KSU|LTO_CLANG|LTO_CLANG_THIN|LTO_CLANG_FULL|THINLTO|CFI_CLANG|MODULES|MODULE_UNLOAD|MODVERSIONS|KPROBES|EXT4_FS|LOCALVERSION))=' \
             "$kernel_out/.config" || true
 
-      - name: Build kernel symbol table
+      - name: Prepare external-module build tree
         shell: bash
         run: |
           set -euxo pipefail
-          make -C "$GITHUB_WORKSPACE/common" \
-            O="$GITHUB_WORKSPACE/kernel-out" \
+          kernel_src="$GITHUB_WORKSPACE/common"
+          kernel_out="$GITHUB_WORKSPACE/kernel-out"
+
+          make -C "$kernel_src" \
+            O="$kernel_out" \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
             GOOGLE_BRANCH="$GOOGLE_BRANCH" \
             KMI_GENERATION="$KMI_GENERATION" \
-            vmlinux -j"$(nproc)"
+            modules_prepare
 
-          test -s "$GITHUB_WORKSPACE/kernel-out/vmlinux"
-          test -s "$GITHUB_WORKSPACE/kernel-out/vmlinux.symvers"
+          test ! -e "$kernel_out/vmlinux"
 
-          kernel_release="$(make -s -C "$GITHUB_WORKSPACE/common" \
-            O="$GITHUB_WORKSPACE/kernel-out" \
+          # KernelSU's SELinux hooks need the generated SELinux headers. This
+          # target prepares only SELinux; it does not build the common kernel.
+          make -C "$kernel_src" \
+            O="$kernel_out" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            GOOGLE_BRANCH="$GOOGLE_BRANCH" \
+            KMI_GENERATION="$KMI_GENERATION" \
+            security/selinux/built-in.a \
+            -j"$(nproc)"
+
+          kernel_release="$(make -s -C "$kernel_src" \
+            O="$kernel_out" \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
@@ -205,7 +219,8 @@ jobs:
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
-            KBUILD_EXTRA_SYMBOLS="$kernel_out/vmlinux.symvers" \
+            CONFIG_KSU=m \
+            KBUILD_MODPOST_WARN=1 \
             modules -j"$(nproc)"
 
           module_path="$ksu_dir/kernelsu.ko"
