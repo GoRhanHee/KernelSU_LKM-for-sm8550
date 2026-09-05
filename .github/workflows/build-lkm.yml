@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  COMMON_REPOSITORY: GoRhanHee/android_kernel_samsung_sm8550_common
+  COMMON_REPOSITORY_URL: https://github.com/GoRhanHee/android_kernel_samsung_sm8550_common.git
   COMMON_REF: android13-5.15-sm8550
   KSU_REPOSITORY: KernelSU-Next/KernelSU-Next
   KSU_REF: 36aa55c521e509449bfe48bae0ab8c397174c1cb
@@ -31,13 +31,16 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout common kernel source
-        uses: actions/checkout@v7
-        with:
-          repository: ${{ env.COMMON_REPOSITORY }}
-          ref: ${{ env.COMMON_REF }}
-          path: common
-          fetch-depth: 1
+      - name: Clone common kernel source from upstream URL
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "$COMMON_REF" \
+            "$COMMON_REPOSITORY_URL" \
+            "$GITHUB_WORKSPACE/common"
 
       - name: Checkout kernel config from this repository
         uses: actions/checkout@v7
