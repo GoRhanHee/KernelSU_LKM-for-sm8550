@@ -1,0 +1,248 @@
+name: Build KernelSU LKM for SM8550
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernelsu-lkm-sm8550-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  COMMON_REPOSITORY: GoRhanHee/android_kernel_samsung_sm8550_common
+  COMMON_REF: android13-5.15-sm8550
+  KSU_REPOSITORY: KernelSU-Next/KernelSU-Next
+  KSU_REF: 36aa55c521e509449bfe48bae0ab8c397174c1cb
+  TOOLCHAIN_VERSION: r614150
+  TOOLCHAIN_URL: https://github.com/GoRhanHee/samsung_sm8550_toolchain/releases/download/clang23-ndk26d/toolchain-clang23-ndk26d.tar.xz
+  GOOGLE_BRANCH: android13-5.15
+  KMI_GENERATION: "8"
+
+jobs:
+  build-kernelsu:
+    name: Build kernelsu.ko
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout common kernel source
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.COMMON_REPOSITORY }}
+          ref: ${{ env.COMMON_REF }}
+          path: common
+          fetch-depth: 1
+
+      - name: Checkout KernelSU-Next
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.KSU_REPOSITORY }}
+          ref: ${{ env.KSU_REF }}
+          path: KernelSU-Next
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            cpio \
+            flex \
+            kmod \
+            libdw-dev \
+            libelf-dev \
+            libncurses-dev \
+            libssl-dev \
+            dwarves \
+            python3 \
+            rsync
+
+      - name: Cache clang toolchain
+        id: toolchain-cache
+        uses: actions/cache@v6
+        with:
+          path: prebuilts
+          key: sm8550-clang-${{ env.TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Download clang toolchain
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            "$TOOLCHAIN_URL" \
+            --output "$RUNNER_TEMP/toolchain.tar.xz"
+          tar -xf "$RUNNER_TEMP/toolchain.tar.xz" \
+            -C "$GITHUB_WORKSPACE" \
+            --strip-components=1 \
+            toolchain/prebuilts
+
+      - name: Select clang toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          toolchain_bin="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-$TOOLCHAIN_VERSION/bin"
+          test -x "$toolchain_bin/clang"
+          echo "$toolchain_bin" >> "$GITHUB_PATH"
+          clang --version
+          ld.lld --version
+
+      - name: Integrate KernelSU Kconfig for this build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          kernel_src="$GITHUB_WORKSPACE/common"
+          ksu_dir="$GITHUB_WORKSPACE/KernelSU-Next/kernel"
+          driver_dir="$kernel_src/drivers"
+
+          test -d "$ksu_dir"
+          test ! -e "$driver_dir/kernelsu"
+          ln -s "$(realpath --relative-to="$driver_dir" "$ksu_dir")" "$driver_dir/kernelsu"
+
+          if ! grep -qF 'source "drivers/kernelsu/Kconfig"' "$driver_dir/Kconfig"; then
+            sed -i '/^endmenu$/i source "drivers\/kernelsu\/Kconfig"' "$driver_dir/Kconfig"
+          fi
+          if ! grep -qF 'obj-$(CONFIG_KSU) += kernelsu/' "$driver_dir/Makefile"; then
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$driver_dir/Makefile"
+          fi
+
+      - name: Prepare kernel configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+          kernel_src="$GITHUB_WORKSPACE/common"
+          kernel_out="$GITHUB_WORKSPACE/kernel-out"
+
+          git config --global --add safe.directory "$kernel_src"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/KernelSU-Next"
+
+          make -C "$kernel_src" \
+            O="$kernel_out" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            GOOGLE_BRANCH="$GOOGLE_BRANCH" \
+            KMI_GENERATION="$KMI_GENERATION" \
+            gki_defconfig
+
+          "$kernel_src/scripts/config" --file "$kernel_out/.config" \
+            -e LTO_CLANG \
+            -d LTO_NONE \
+            -e LTO_CLANG_THIN \
+            -d LTO_CLANG_FULL \
+            -e THINLTO \
+            -e CFI_CLANG \
+            -e MODULES \
+            -e MODULE_UNLOAD \
+            -e MODVERSIONS \
+            -e KPROBES \
+            -e EXT4_FS \
+            -m KSU \
+            --set-str LOCALVERSION "-GoRhanHee-Kernel" \
+            -d LOCALVERSION_AUTO
+
+          make -C "$kernel_src" \
+            O="$kernel_out" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            GOOGLE_BRANCH="$GOOGLE_BRANCH" \
+            KMI_GENERATION="$KMI_GENERATION" \
+            olddefconfig
+
+          grep -E '^(CONFIG_(KSU|LTO_CLANG|LTO_CLANG_THIN|LTO_CLANG_FULL|THINLTO|CFI_CLANG|MODULES|MODULE_UNLOAD|MODVERSIONS|KPROBES|EXT4_FS|LOCALVERSION))=' \
+            "$kernel_out/.config" || true
+
+      - name: Build kernel symbol table
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make -C "$GITHUB_WORKSPACE/common" \
+            O="$GITHUB_WORKSPACE/kernel-out" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            GOOGLE_BRANCH="$GOOGLE_BRANCH" \
+            KMI_GENERATION="$KMI_GENERATION" \
+            vmlinux -j"$(nproc)"
+
+          test -s "$GITHUB_WORKSPACE/kernel-out/vmlinux"
+          test -s "$GITHUB_WORKSPACE/kernel-out/vmlinux.symvers"
+
+          kernel_release="$(make -s -C "$GITHUB_WORKSPACE/common" \
+            O="$GITHUB_WORKSPACE/kernel-out" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            GOOGLE_BRANCH="$GOOGLE_BRANCH" \
+            KMI_GENERATION="$KMI_GENERATION" \
+            kernelrelease)"
+          echo "Kernel release: $kernel_release"
+          echo "KERNEL_RELEASE=$kernel_release" >> "$GITHUB_ENV"
+
+      - name: Build only kernelsu.ko
+        shell: bash
+        run: |
+          set -euxo pipefail
+          kernel_out="$GITHUB_WORKSPACE/kernel-out"
+          ksu_dir="$GITHUB_WORKSPACE/KernelSU-Next/kernel"
+
+          make -C "$kernel_out" \
+            M="$ksu_dir" \
+            src="$ksu_dir" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            KBUILD_EXTRA_SYMBOLS="$kernel_out/vmlinux.symvers" \
+            modules -j"$(nproc)"
+
+          module_path="$ksu_dir/kernelsu.ko"
+          test -s "$module_path"
+          cp "$module_path" "$GITHUB_WORKSPACE/kernelsu.ko"
+
+      - name: Validate kernelsu.ko
+        shell: bash
+        run: |
+          set -euxo pipefail
+          module_path="$GITHUB_WORKSPACE/kernelsu.ko"
+
+          test "$(llvm-readelf -h "$module_path" | awk -F: '/Class:/ {gsub(/^[[:space:]]+/, "", $2); print $2}')" = "ELF64"
+          test "$(llvm-readelf -h "$module_path" | awk -F: '/Machine:/ {gsub(/^[[:space:]]+/, "", $2); print $2}')" = "AArch64"
+
+          module_vermagic="$(modinfo -F vermagic "$module_path")"
+          echo "Expected kernel release: $KERNEL_RELEASE"
+          echo "Module vermagic: $module_vermagic"
+          case "$module_vermagic" in
+            "$KERNEL_RELEASE"*) ;;
+            *)
+              echo "kernelsu.ko vermagic does not match the generated kernel"
+              exit 1
+              ;;
+          esac
+
+          if llvm-readelf -Ws "$module_path" | grep -Eq '__cfi_slowpath_diag|__ubsan_handle_cfi_check_fail_abort'; then
+            echo "Found legacy CFI symbols in kernelsu.ko"
+            exit 1
+          fi
+
+          llvm-readelf -S "$module_path" | grep -E '__versions|\.modinfo|\.kcfi_traps' || true
+          llvm-strip -d "$module_path"
+          test -s "$module_path"
+
+      - name: Upload kernelsu.ko
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernelsu-lkm-sm8550
+          path: kernelsu.ko
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
