@@ -165,7 +165,7 @@ jobs:
           grep -E '^(CONFIG_(KSU|LTO_CLANG|LTO_CLANG_THIN|LTO_CLANG_FULL|THINLTO|CFI_CLANG|MODULES|MODULE_UNLOAD|MODVERSIONS|KPROBES|EXT4_FS|LOCALVERSION))=' \
             "$kernel_out/.config" || true
 
-      - name: Prepare external-module build tree
+      - name: Prepare kernel build tree
         shell: bash
         run: |
           set -euxo pipefail
@@ -181,10 +181,10 @@ jobs:
             KMI_GENERATION="$KMI_GENERATION" \
             modules_prepare
 
-          test ! -e "$kernel_out/vmlinux"
-
-          # KernelSU's SELinux hooks need the generated SELinux headers. This
-          # target prepares only SELinux; it does not build the common kernel.
+          # CONFIG_MODVERSIONS requires the kernel's real symbol CRC dump.
+          # modules_prepare intentionally does not generate Module.symvers.
+          # Build vmlinux in Actions so vmlinux.symvers contains the CRC for
+          # module_layout and all other built-in exported symbols.
           make -C "$kernel_src" \
             O="$kernel_out" \
             ARCH=arm64 \
@@ -192,8 +192,14 @@ jobs:
             LLVM_IAS=1 \
             GOOGLE_BRANCH="$GOOGLE_BRANCH" \
             KMI_GENERATION="$KMI_GENERATION" \
-            security/selinux/built-in.a \
+            vmlinux \
             -j"$(nproc)"
+
+          test -s "$kernel_out/vmlinux.symvers"
+          cp "$kernel_out/vmlinux.symvers" "$kernel_out/Module.symvers"
+          test -s "$kernel_out/Module.symvers"
+          grep -Eq '(^|[[:space:]])module_layout([[:space:]]|$)' \
+            "$kernel_out/Module.symvers"
 
           kernel_release="$(make -s -C "$kernel_src" \
             O="$kernel_out" \
@@ -252,7 +258,11 @@ jobs:
             exit 1
           fi
 
-          llvm-readelf -S "$module_path" | grep -E '__versions|\.modinfo|\.kcfi_traps' || true
+          versions_size="$(llvm-readelf -SW "$module_path" | awk '$2 == "__versions" { print "0x" $6; exit }')"
+          test -n "$versions_size"
+          test "$versions_size" != "0x0"
+          echo "__versions size: $versions_size"
+          llvm-readelf -S "$module_path" | grep -E '__versions|\.modinfo|\.kcfi_traps'
           llvm-strip -d "$module_path"
           test -s "$module_path"
 
