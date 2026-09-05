@@ -22,6 +22,7 @@ env:
   TOOLCHAIN_URL: https://github.com/GoRhanHee/samsung_sm8550_toolchain/releases/download/clang23-ndk26d/toolchain-clang23-ndk26d.tar.xz
   GOOGLE_BRANCH: android13-5.15
   KMI_GENERATION: "8"
+  BUILD_JOBS: "16"
 
 jobs:
   build-kernelsu:
@@ -193,7 +194,7 @@ jobs:
             GOOGLE_BRANCH="$GOOGLE_BRANCH" \
             KMI_GENERATION="$KMI_GENERATION" \
             vmlinux \
-            -j"$(nproc)"
+            -j"$BUILD_JOBS"
 
           test -s "$kernel_out/vmlinux.symvers"
           cp "$kernel_out/vmlinux.symvers" "$kernel_out/Module.symvers"
@@ -227,7 +228,7 @@ jobs:
             LLVM_IAS=1 \
             CONFIG_KSU=m \
             KBUILD_MODPOST_WARN=1 \
-            modules -j"$(nproc)"
+            modules -j"$BUILD_JOBS"
 
           module_path="$ksu_dir/kernelsu.ko"
           test -s "$module_path"
