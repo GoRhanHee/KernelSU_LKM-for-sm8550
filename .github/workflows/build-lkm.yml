@@ -16,8 +16,6 @@ concurrency:
 env:
   COMMON_REPOSITORY_URL: https://github.com/GoRhanHee/android_kernel_samsung_sm8550_common.git
   COMMON_REF: android13-5.15-sm8550
-  KSU_REPOSITORY: KernelSU-Next/KernelSU-Next
-  KSU_REF: 36aa55c521e509449bfe48bae0ab8c397174c1cb
   TOOLCHAIN_VERSION: r614150
   TOOLCHAIN_URL: https://github.com/GoRhanHee/samsung_sm8550_toolchain/releases/download/clang23-ndk26d/toolchain-clang23-ndk26d.tar.xz
   GOOGLE_BRANCH: android13-5.15
@@ -26,9 +24,31 @@ env:
 
 jobs:
   build-kernelsu:
-    name: Build kernelsu.ko
+    name: Build ${{ matrix.name }} LKM
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: kernelsu-next
+            name: KernelSU-Next
+            repository: KernelSU-Next/KernelSU-Next
+            ref: 36aa55c521e509449bfe48bae0ab8c397174c1cb
+            module_file: kernelsu.ko
+            artifact_file: kernelsu-next.ko
+          - id: xxkernelsu
+            name: xxKernelSU
+            repository: backslashxx/KernelSU
+            ref: db65bfc28ca116af7fc41e83f63c05b95d7d7754
+            module_file: ksu.ko
+            artifact_file: xxkernelsu.ko
+          - id: kernelsu-original
+            name: KernelSU
+            repository: tiann/KernelSU
+            ref: 3c1240625655978f319a98398031100b80e9da7c
+            module_file: kernelsu.ko
+            artifact_file: kernelsu.ko
 
     steps:
       - name: Clone common kernel source from upstream URL
@@ -53,12 +73,12 @@ jobs:
           sparse-checkout-cone-mode: false
           fetch-depth: 1
 
-      - name: Checkout KernelSU-Next
+      - name: Checkout KSU source
         uses: actions/checkout@v7
         with:
-          repository: ${{ env.KSU_REPOSITORY }}
-          ref: ${{ env.KSU_REF }}
-          path: KernelSU-Next
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.ref }}
+          path: ksu-source
           fetch-depth: 1
 
       - name: Install build dependencies
@@ -119,7 +139,7 @@ jobs:
         run: |
           set -euxo pipefail
           kernel_src="$GITHUB_WORKSPACE/common"
-          ksu_dir="$GITHUB_WORKSPACE/KernelSU-Next/kernel"
+          ksu_dir="$GITHUB_WORKSPACE/ksu-source/kernel"
           driver_dir="$kernel_src/drivers"
 
           test -d "$ksu_dir"
@@ -140,10 +160,12 @@ jobs:
           kernel_src="$GITHUB_WORKSPACE/common"
           kernel_out="$GITHUB_WORKSPACE/kernel-out"
           kernel_config="$GITHUB_WORKSPACE/kernel-config/custom_defconfigs/gorhanhee_defconfig"
+          ksu_dir="$GITHUB_WORKSPACE/ksu-source/kernel"
 
           git config --global --add safe.directory "$kernel_src"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/KernelSU-Next"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/ksu-source"
           test -s "$kernel_config"
+          test -d "$ksu_dir"
 
           make -C "$kernel_src" \
             O="$kernel_out" \
@@ -238,12 +260,14 @@ jobs:
           echo "Kernel release: $kernel_release"
           echo "KERNEL_RELEASE=$kernel_release" >> "$GITHUB_ENV"
 
-      - name: Build only kernelsu.ko
+      - name: Build only ${{ matrix.module_file }}
         shell: bash
         run: |
           set -euxo pipefail
           kernel_out="$GITHUB_WORKSPACE/kernel-out"
-          ksu_dir="$GITHUB_WORKSPACE/KernelSU-Next/kernel"
+          ksu_dir="$GITHUB_WORKSPACE/ksu-source/kernel"
+          module_file="${{ matrix.module_file }}"
+          artifact_file="${{ matrix.artifact_file }}"
 
           make -C "$kernel_out" \
             M="$ksu_dir" \
@@ -255,15 +279,15 @@ jobs:
             KBUILD_MODPOST_WARN=1 \
             modules -j"$BUILD_JOBS"
 
-          module_path="$ksu_dir/kernelsu.ko"
+          module_path="$ksu_dir/$module_file"
           test -s "$module_path"
-          cp "$module_path" "$GITHUB_WORKSPACE/kernelsu.ko"
+          cp "$module_path" "$GITHUB_WORKSPACE/$artifact_file"
 
-      - name: Validate kernelsu.ko
+      - name: Validate ${{ matrix.artifact_file }}
         shell: bash
         run: |
           set -euxo pipefail
-          module_path="$GITHUB_WORKSPACE/kernelsu.ko"
+          module_path="$GITHUB_WORKSPACE/${{ matrix.artifact_file }}"
 
           test "$(llvm-readelf -h "$module_path" | awk -F: '/Class:/ {gsub(/^[[:space:]]+/, "", $2); print $2}')" = "ELF64"
           test "$(llvm-readelf -h "$module_path" | awk -F: '/Machine:/ {gsub(/^[[:space:]]+/, "", $2); print $2}')" = "AArch64"
@@ -274,13 +298,13 @@ jobs:
           case "$module_vermagic" in
             "$KERNEL_RELEASE"*) ;;
             *)
-              echo "kernelsu.ko vermagic does not match the generated kernel"
+              echo "${{ matrix.artifact_file }} vermagic does not match the generated kernel"
               exit 1
               ;;
           esac
 
           if llvm-readelf -Ws "$module_path" | grep -Eq '__cfi_slowpath_diag|__ubsan_handle_cfi_check_fail_abort'; then
-            echo "Found legacy CFI symbols in kernelsu.ko"
+            echo "Found legacy CFI symbols in ${{ matrix.artifact_file }}"
             exit 1
           fi
 
@@ -292,11 +316,11 @@ jobs:
           llvm-strip -d "$module_path"
           test -s "$module_path"
 
-      - name: Upload kernelsu.ko
+      - name: Upload ${{ matrix.artifact_file }}
         uses: actions/upload-artifact@v7
         with:
-          name: kernelsu-lkm-sm8550
-          path: kernelsu.ko
+          name: kernelsu-lkm-sm8550-${{ matrix.id }}
+          path: ${{ matrix.artifact_file }}
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
