@@ -92,7 +92,10 @@ jobs:
           set -euxo pipefail
           toolchain_bin="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-$TOOLCHAIN_VERSION/bin"
           test -x "$toolchain_bin/clang"
+          export PATH="$toolchain_bin:$PATH"
           echo "$toolchain_bin" >> "$GITHUB_PATH"
+          test "$(command -v clang)" = "$toolchain_bin/clang"
+          test "$(command -v ld.lld)" = "$toolchain_bin/ld.lld"
           clang --version
           ld.lld --version
 
