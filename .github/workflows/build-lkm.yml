@@ -284,7 +284,7 @@ jobs:
             exit 1
           fi
 
-          versions_size="$(llvm-readelf -SW "$module_path" | awk '$2 == "__versions" { print "0x" $6; exit }')"
+          versions_size="$(llvm-readelf -SW "$module_path" | awk '$2 == "__versions" { size = "0x" $6 } END { print size }')"
           test -n "$versions_size"
           test "$versions_size" != "0x0"
           echo "__versions size: $versions_size"
