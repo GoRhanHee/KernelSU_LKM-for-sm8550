@@ -16,6 +16,8 @@ concurrency:
 env:
   COMMON_REPOSITORY: GoRhanHee/android_kernel_samsung_sm8550_common
   COMMON_REF: android13-5.15-sm8550
+  KERNEL_CONFIG_REPOSITORY: GoRhanHee/android_kernel_samsung_sm8550
+  KERNEL_CONFIG_REF: 157bc3f214f8ed670f6e7cd1466bf74c21fe3108
   KSU_REPOSITORY: KernelSU-Next/KernelSU-Next
   KSU_REF: 36aa55c521e509449bfe48bae0ab8c397174c1cb
   TOOLCHAIN_VERSION: r614150
@@ -39,11 +41,11 @@ jobs:
           path: common
           fetch-depth: 1
 
-      - name: Checkout kernel config from this repository
+      - name: Checkout main kernel config from upstream repository
         uses: actions/checkout@v7
         with:
-          repository: ${{ github.repository }}
-          ref: ${{ github.sha }}
+          repository: ${{ env.KERNEL_CONFIG_REPOSITORY }}
+          ref: ${{ env.KERNEL_CONFIG_REF }}
           path: kernel-config
           sparse-checkout: |
             custom_defconfigs/gorhanhee_defconfig
