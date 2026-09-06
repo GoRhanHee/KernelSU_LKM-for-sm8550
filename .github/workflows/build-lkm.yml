@@ -49,6 +49,30 @@ jobs:
             ref: 3c1240625655978f319a98398031100b80e9da7c
             module_file: kernelsu.ko
             artifact_file: kernelsu.ko
+          - id: kowsu
+            name: KowSU
+            repository: KOWX712/KernelSU
+            ref: 36adc22d2fe53c8d6bc379a160133d8c562e2401
+            module_file: kernelsu.ko
+            artifact_file: kowsu.ko
+          - id: 5ec1cff-kernelsu
+            name: KernelSU (5ec1cff)
+            repository: 5ec1cff/KernelSU
+            ref: 6a4cac03f35751b066fcbb08e24fb8198ca354e1
+            module_file: kernelsu.ko
+            artifact_file: 5ec1cff-kernelsu.ko
+          - id: sukisu-ultra
+            name: SukiSU Ultra
+            repository: SukiSU-Ultra/SukiSU-Ultra
+            ref: 9fbe8fe8ca90c62c259c5894bf96d02ac31209b9
+            module_file: kernelsu.ko
+            artifact_file: sukisu-ultra.ko
+          - id: resukisu
+            name: ReSukiSU
+            repository: ReSukiSU/ReSukiSU
+            ref: 3c1882886dbbb54f4aae7ddf205f8ccde32c2a34
+            module_file: kernelsu.ko
+            artifact_file: resukisu.ko
 
     steps:
       - name: Clone common kernel source from upstream URL
