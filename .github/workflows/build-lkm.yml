@@ -36,43 +36,36 @@ jobs:
             repository: KernelSU-Next/KernelSU-Next
             ref: 36aa55c521e509449bfe48bae0ab8c397174c1cb
             module_file: kernelsu.ko
-            artifact_file: kernelsu-next.ko
           - id: xxkernelsu
             name: xxKernelSU
             repository: backslashxx/KernelSU
             ref: db65bfc28ca116af7fc41e83f63c05b95d7d7754
             module_file: ksu.ko
-            artifact_file: xxkernelsu.ko
           - id: kernelsu-original
             name: KernelSU
             repository: tiann/KernelSU
             ref: 3c1240625655978f319a98398031100b80e9da7c
             module_file: kernelsu.ko
-            artifact_file: kernelsu.ko
           - id: kowsu
             name: KowSU
             repository: KOWX712/KernelSU
             ref: 36adc22d2fe53c8d6bc379a160133d8c562e2401
             module_file: kernelsu.ko
-            artifact_file: kowsu.ko
-          - id: 5ec1cff-kernelsu
-            name: KernelSU (5ec1cff)
+          - id: mksu
+            name: MKSU
             repository: 5ec1cff/KernelSU
             ref: 6a4cac03f35751b066fcbb08e24fb8198ca354e1
             module_file: kernelsu.ko
-            artifact_file: 5ec1cff-kernelsu.ko
           - id: sukisu-ultra
             name: SukiSU Ultra
             repository: SukiSU-Ultra/SukiSU-Ultra
             ref: 9fbe8fe8ca90c62c259c5894bf96d02ac31209b9
             module_file: kernelsu.ko
-            artifact_file: sukisu-ultra.ko
           - id: resukisu
             name: ReSukiSU
             repository: ReSukiSU/ReSukiSU
             ref: 3c1882886dbbb54f4aae7ddf205f8ccde32c2a34
             module_file: kernelsu.ko
-            artifact_file: resukisu.ko
 
     steps:
       - name: Clone common kernel source from upstream URL
@@ -291,7 +284,6 @@ jobs:
           kernel_out="$GITHUB_WORKSPACE/kernel-out"
           ksu_dir="$GITHUB_WORKSPACE/ksu-source/kernel"
           module_file="${{ matrix.module_file }}"
-          artifact_file="${{ matrix.artifact_file }}"
 
           make -C "$kernel_out" \
             M="$ksu_dir" \
@@ -305,13 +297,12 @@ jobs:
 
           module_path="$ksu_dir/$module_file"
           test -s "$module_path"
-          cp "$module_path" "$GITHUB_WORKSPACE/$artifact_file"
 
-      - name: Validate ${{ matrix.artifact_file }}
+      - name: Validate ${{ matrix.module_file }}
         shell: bash
         run: |
           set -euxo pipefail
-          module_path="$GITHUB_WORKSPACE/${{ matrix.artifact_file }}"
+          module_path="$GITHUB_WORKSPACE/ksu-source/kernel/${{ matrix.module_file }}"
 
           test "$(llvm-readelf -h "$module_path" | awk -F: '/Class:/ {gsub(/^[[:space:]]+/, "", $2); print $2}')" = "ELF64"
           test "$(llvm-readelf -h "$module_path" | awk -F: '/Machine:/ {gsub(/^[[:space:]]+/, "", $2); print $2}')" = "AArch64"
@@ -322,13 +313,13 @@ jobs:
           case "$module_vermagic" in
             "$KERNEL_RELEASE"*) ;;
             *)
-              echo "${{ matrix.artifact_file }} vermagic does not match the generated kernel"
+              echo "${{ matrix.module_file }} vermagic does not match the generated kernel"
               exit 1
               ;;
           esac
 
           if llvm-readelf -Ws "$module_path" | grep -Eq '__cfi_slowpath_diag|__ubsan_handle_cfi_check_fail_abort'; then
-            echo "Found legacy CFI symbols in ${{ matrix.artifact_file }}"
+            echo "Found legacy CFI symbols in ${{ matrix.module_file }}"
             exit 1
           fi
 
@@ -340,11 +331,11 @@ jobs:
           llvm-strip -d "$module_path"
           test -s "$module_path"
 
-      - name: Upload ${{ matrix.artifact_file }}
+      - name: Upload ${{ matrix.name }} artifact
         uses: actions/upload-artifact@v7
         with:
           name: kernelsu-lkm-sm8550-${{ matrix.id }}
-          path: ${{ matrix.artifact_file }}
+          path: ksu-source/kernel/${{ matrix.module_file }}
           if-no-files-found: error
-          compression-level: 0
+          compression-level: 9
           retention-days: 30
