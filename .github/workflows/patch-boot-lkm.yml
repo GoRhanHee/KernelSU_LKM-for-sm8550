@@ -1,0 +1,378 @@
+name: Patch boot image with KernelSU LKM
+
+run-name: Patch ${{ inputs.image_type }} with ${{ inputs.kernelsu }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: Direct download link (.img, .img.lz4, .zip, or .tar)
+        required: true
+        type: string
+      image_type:
+        description: Partition image contained in the download
+        required: true
+        default: init_boot
+        type: choice
+        options:
+          - init_boot
+          - boot
+          - vendor_boot
+      kernelsu:
+        description: KernelSU LKM variant
+        required: true
+        default: kernelsu-next
+        type: choice
+        options:
+          - kernelsu-next
+          - xxkernelsu
+          - kernelsu-original
+          - kowsu
+          - mksu
+          - sukisu-ultra
+          - resukisu
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: patch-boot-lkm-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  patch-image:
+    name: Patch ${{ inputs.image_type }} with ${{ inputs.kernelsu }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      IMAGE_TYPE: ${{ inputs.image_type }}
+      IMAGE_URL: ${{ inputs.image_url }}
+      KMI: android13-5.15
+      KSU_VARIANT: ${{ inputs.kernelsu }}
+
+    steps:
+      - name: Resolve KernelSU variant
+        id: variant
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Keep these refs and module names in sync with build-lkm.yml.
+          case "$KSU_VARIANT" in
+            kernelsu-next)
+              repository="KernelSU-Next/KernelSU-Next"
+              ksu_ref="36aa55c521e509449bfe48bae0ab8c397174c1cb"
+              module_file="kernelsu.ko"
+              ;;
+            xxkernelsu)
+              repository="backslashxx/KernelSU"
+              ksu_ref="db65bfc28ca116af7fc41e83f63c05b95d7d7754"
+              module_file="ksu.ko"
+              ;;
+            kernelsu-original)
+              repository="tiann/KernelSU"
+              ksu_ref="3c1240625655978f319a98398031100b80e9da7c"
+              module_file="kernelsu.ko"
+              ;;
+            kowsu)
+              repository="KOWX712/KernelSU"
+              ksu_ref="36adc22d2fe53c8d6bc379a160133d8c562e2401"
+              module_file="kernelsu.ko"
+              ;;
+            mksu)
+              repository="5ec1cff/KernelSU"
+              ksu_ref="6a4cac03f35751b066fcbb08e24fb8198ca354e1"
+              module_file="kernelsu.ko"
+              ;;
+            sukisu-ultra)
+              repository="SukiSU-Ultra/SukiSU-Ultra"
+              ksu_ref="9fbe8fe8ca90c62c259c5894bf96d02ac31209b9"
+              module_file="kernelsu.ko"
+              ;;
+            resukisu)
+              repository="ReSukiSU/ReSukiSU"
+              ksu_ref="3c1882886dbbb54f4aae7ddf205f8ccde32c2a34"
+              module_file="kernelsu.ko"
+              ;;
+            *)
+              echo "Unsupported KernelSU variant: $KSU_VARIANT" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "repository=$repository"
+            echo "ksu_ref=$ksu_ref"
+            echo "module_file=$module_file"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout selected KernelSU source
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.variant.outputs.repository }}
+          ref: ${{ steps.variant.outputs.ksu_ref }}
+          path: ksu-source
+          fetch-depth: 1
+
+      - name: Download selected LKM artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODULE_FILE: ${{ steps.variant.outputs.module_file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_name="kernelsu-lkm-sm8550-$KSU_VARIANT"
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow build-lkm.yml \
+            --branch main \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+
+          if [[ -z "$run_id" || "$run_id" == "null" ]]; then
+            echo "No successful build-lkm.yml run was found on main." >&2
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/lkm"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$artifact_name" \
+            --dir "$GITHUB_WORKSPACE/lkm"
+
+          module_path="$GITHUB_WORKSPACE/lkm/$MODULE_FILE"
+          test -s "$module_path"
+          echo "LKM_PATH=$module_path" >> "$GITHUB_ENV"
+          echo "Using $artifact_name from workflow run $run_id"
+          sha256sum "$module_path"
+
+      - name: Install patching dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            file \
+            libclang-dev \
+            lz4 \
+            unzip
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+
+      - name: Build matching ksuinit and host patcher
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/ksu-target
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          llvm_bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          clang_path="$llvm_bin/aarch64-linux-android26-clang"
+          test -x "$clang_path"
+
+          export CC_aarch64_linux_android="$clang_path"
+          export CXX_aarch64_linux_android="${clang_path}++"
+          export AR_aarch64_linux_android="$llvm_bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$clang_path"
+          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
+
+          builtins="$($clang_path --print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a"
+          test -f "$builtins"
+          export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$builtins"
+
+          cargo build \
+            --locked \
+            --manifest-path "$GITHUB_WORKSPACE/ksu-source/userspace/ksuinit/Cargo.toml" \
+            --target aarch64-linux-android \
+            --release
+
+          unset RUSTFLAGS
+          cargo build \
+            --locked \
+            --manifest-path "$GITHUB_WORKSPACE/ksu-source/userspace/ksud/Cargo.toml" \
+            --release
+
+          ksuinit_path="$CARGO_TARGET_DIR/aarch64-linux-android/release/ksuinit"
+          ksud_path="$CARGO_TARGET_DIR/release/ksud"
+          test -x "$ksuinit_path"
+          test -x "$ksud_path"
+          file "$ksuinit_path" "$ksud_path"
+          "$ksud_path" boot-patch --help >/dev/null
+
+          {
+            echo "KSUINIT_PATH=$ksuinit_path"
+            echo "KSUD_PATH=$ksud_path"
+          } >> "$GITHUB_ENV"
+
+      - name: Download and prepare partition image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$IMAGE_URL" in
+            http://*|https://*) ;;
+            *)
+              echo "image_url must be an HTTP or HTTPS URL." >&2
+              exit 1
+              ;;
+          esac
+
+          download_path="$RUNNER_TEMP/partition-image.download"
+          extracted_path="$RUNNER_TEMP/partition-image.extracted"
+          input_dir="$GITHUB_WORKSPACE/input"
+          input_image="$input_dir/$IMAGE_TYPE.img"
+          archive_entries="$RUNNER_TEMP/archive-entries.txt"
+          mkdir -p "$input_dir"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 \
+            --output "$download_path" \
+            "$IMAGE_URL"
+          test -s "$download_path"
+
+          extract_named_image() {
+            local archive_kind="$1"
+            local member
+
+            if [[ "$archive_kind" == "zip" ]]; then
+              unzip -Z1 "$download_path" > "$archive_entries"
+            else
+              tar -tf "$download_path" > "$archive_entries"
+            fi
+
+            member="$(awk -v target="$IMAGE_TYPE.img" '
+              {
+                entry = $0
+                sub(/\r$/, "", entry)
+                base = entry
+                sub(/^.*\//, "", base)
+                if (base == target) {
+                  print entry
+                  exit
+                }
+              }
+            ' "$archive_entries")"
+
+            if [[ -z "$member" ]]; then
+              member="$(awk -v target="$IMAGE_TYPE.img.lz4" '
+                {
+                  entry = $0
+                  sub(/\r$/, "", entry)
+                  base = entry
+                  sub(/^.*\//, "", base)
+                  if (base == target) {
+                    print entry
+                    exit
+                  }
+                }
+              ' "$archive_entries")"
+            fi
+
+            if [[ -z "$member" ]]; then
+              echo "Archive does not contain $IMAGE_TYPE.img or $IMAGE_TYPE.img.lz4." >&2
+              sed -n '1,80p' "$archive_entries" >&2
+              exit 1
+            fi
+
+            if [[ "$archive_kind" == "zip" ]]; then
+              unzip -p "$download_path" "$member" > "$extracted_path"
+            else
+              tar -xOf "$download_path" "$member" > "$extracted_path"
+            fi
+            test -s "$extracted_path"
+
+            if [[ "$member" == *.lz4 ]]; then
+              lz4 -d -f "$extracted_path" "$input_image"
+            else
+              cp "$extracted_path" "$input_image"
+            fi
+          }
+
+          if unzip -tqq "$download_path" >/dev/null 2>&1; then
+            extract_named_image zip
+          elif tar -tf "$download_path" >/dev/null 2>&1; then
+            extract_named_image tar
+          elif lz4 -t "$download_path" >/dev/null 2>&1; then
+            lz4 -d -f "$download_path" "$input_image"
+          else
+            cp "$download_path" "$input_image"
+          fi
+
+          test -s "$input_image"
+          magic="$(dd if="$input_image" bs=8 count=1 status=none)"
+          case "$IMAGE_TYPE:$magic" in
+            vendor_boot:VNDRBOOT|boot:ANDROID\!|init_boot:ANDROID\!) ;;
+            *)
+              echo "Downloaded file magic '$magic' does not match $IMAGE_TYPE." >&2
+              exit 1
+              ;;
+          esac
+
+          echo "INPUT_IMAGE=$input_image" >> "$GITHUB_ENV"
+          file "$input_image"
+          sha256sum "$input_image"
+
+      - name: Patch and repack image
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          output_dir="$GITHUB_WORKSPACE/output"
+          output_image="$output_dir/$IMAGE_TYPE.img"
+          mkdir -p "$output_dir"
+
+          "$KSUD_PATH" boot-patch \
+            --boot "$INPUT_IMAGE" \
+            --module "$LKM_PATH" \
+            --init "$KSUINIT_PATH" \
+            --kmi "$KMI" \
+            --arch aarch64 \
+            --out "$output_dir" \
+            --out-name "$IMAGE_TYPE.img"
+
+          test -s "$output_image"
+          if cmp -s "$INPUT_IMAGE" "$output_image"; then
+            echo "Patched image is identical to the input image." >&2
+            exit 1
+          fi
+          file "$output_image"
+
+      - name: Create image and Odin TAR outputs
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$GITHUB_WORKSPACE/output"
+          lz4 -B6 --content-size "$IMAGE_TYPE.img" "$IMAGE_TYPE.img.lz4"
+          tar --format=ustar -cvf "$IMAGE_TYPE.tar" "$IMAGE_TYPE.img.lz4"
+          rm "$IMAGE_TYPE.img.lz4"
+          sha256sum "$IMAGE_TYPE.img" "$IMAGE_TYPE.tar" > SHA256SUMS
+
+          tar -tf "$IMAGE_TYPE.tar"
+          cat SHA256SUMS
+
+      - name: Upload patched image outputs
+        uses: actions/upload-artifact@v7
+        with:
+          name: patched-${{ inputs.image_type }}-${{ inputs.kernelsu }}
+          path: |
+            output/${{ inputs.image_type }}.img
+            output/${{ inputs.image_type }}.tar
+            output/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
